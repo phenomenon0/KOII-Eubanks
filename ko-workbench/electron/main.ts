@@ -70,6 +70,42 @@ ipcMain.handle('fs:readFile', async (_event, filePath: string) => {
   return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength)
 })
 
+// IPC: list audio files in a directory
+ipcMain.handle('fs:listAudioFiles', async (_event, dirPath: string) => {
+  try {
+    const entries = fs.readdirSync(dirPath, { withFileTypes: true })
+    const audioExts = new Set(['.wav', '.mp3', '.aif', '.aiff', '.flac', '.ogg'])
+    const files: { name: string; path: string; size: number }[] = []
+    for (const entry of entries) {
+      if (entry.isFile() && audioExts.has(path.extname(entry.name).toLowerCase())) {
+        const fullPath = path.join(dirPath, entry.name)
+        const stat = fs.statSync(fullPath)
+        files.push({ name: entry.name, path: fullPath, size: stat.size })
+      }
+    }
+    return files
+  } catch { return [] }
+})
+
+// IPC: list subdirectories (for sample packs)
+ipcMain.handle('fs:listDirs', async (_event, dirPath: string) => {
+  try {
+    const entries = fs.readdirSync(dirPath, { withFileTypes: true })
+    return entries.filter(e => e.isDirectory()).map(e => ({
+      name: e.name,
+      path: path.join(dirPath, e.name),
+    }))
+  } catch { return [] }
+})
+
+// IPC: get app samples path
+ipcMain.handle('app:samplesPath', async () => {
+  if (isDev) {
+    return path.join(process.cwd(), 'samples')
+  }
+  return path.join(app.getPath('userData'), 'samples')
+})
+
 app.whenReady().then(createWindow)
 
 app.on('window-all-closed', () => {

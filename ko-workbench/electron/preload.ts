@@ -12,4 +12,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('fs:readFile', filePath),
   openZip: () =>
     ipcRenderer.invoke('dialog:openFiles', [{ name: 'ZIP Archive', extensions: ['zip'] }]),
+  listAudioFiles: (dirPath: string) =>
+    ipcRenderer.invoke('fs:listAudioFiles', dirPath),
+  listDirs: (dirPath: string) =>
+    ipcRenderer.invoke('fs:listDirs', dirPath),
+  samplesPath: () =>
+    ipcRenderer.invoke('app:samplesPath'),
 })

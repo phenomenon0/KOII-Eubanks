@@ -18,6 +18,9 @@ declare global {
       writeFile: (path: string, data: ArrayBuffer) => Promise<void>
       readFile: (path: string) => Promise<ArrayBuffer>
       openZip: () => Promise<string[]>
+      listAudioFiles: (dirPath: string) => Promise<{ name: string; path: string; size: number }[]>
+      listDirs: (dirPath: string) => Promise<{ name: string; path: string }[]>
+      samplesPath: () => Promise<string>
     }
   }
 }
