@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useStore, useDispatch } from '../../store'
 import { DevicePanel } from '../components/DevicePanel'
 import { SoundLibrary } from '../panels/SoundLibrary'
@@ -41,8 +41,9 @@ function PacksBrowser({ onClose }: { onClose: () => void }) {
   const [selectedPack, setSelectedPack] = useState<PackInfo | null>(null)
   const [files, setFiles] = useState<AudioFile[]>([])
   const [loading, setLoading] = useState(true)
+  const [playingFile, setPlayingFile] = useState<string | null>(null)
+  const audioRef = useRef<{ stop: () => void } | null>(null)
 
-  // Load packs on mount
   useEffect(() => {
     (async () => {
       try {
@@ -56,7 +57,6 @@ function PacksBrowser({ onClose }: { onClose: () => void }) {
     })()
   }, [])
 
-  // Load files when pack selected
   useEffect(() => {
     if (!selectedPack) { setFiles([]); return }
     (async () => {
@@ -65,24 +65,50 @@ function PacksBrowser({ onClose }: { onClose: () => void }) {
     })()
   }, [selectedPack])
 
+  // Cleanup audio on unmount
+  useEffect(() => {
+    return () => { audioRef.current?.stop() }
+  }, [])
+
+  const previewFile = async (f: AudioFile) => {
+    // Stop current preview
+    audioRef.current?.stop()
+    audioRef.current = null
+
+    if (playingFile === f.path) {
+      setPlayingFile(null)
+      return
+    }
+
+    try {
+      const buffer = await window.electronAPI.readFile(f.path)
+      const ctx = new AudioContext()
+      const audioBuffer = await ctx.decodeAudioData(buffer.slice(0))
+      const source = ctx.createBufferSource()
+      source.buffer = audioBuffer
+      source.connect(ctx.destination)
+      source.start()
+      source.onended = () => {
+        setPlayingFile(null)
+        audioRef.current = null
+        ctx.close()
+      }
+      audioRef.current = {
+        stop: () => {
+          try { source.stop() } catch { /* already stopped */ }
+          ctx.close()
+        }
+      }
+      setPlayingFile(f.path)
+    } catch (e) {
+      console.error('Preview failed:', e)
+      setPlayingFile(null)
+    }
+  }
+
   const loadAllToQueue = async () => {
     for (const f of files) {
-      try {
-        const buffer = await window.electronAPI.readFile(f.path)
-        const blob = new Blob([buffer], { type: 'audio/wav' })
-        const file = new File([blob], f.name, { type: 'audio/wav' })
-        dispatch({
-          type: 'ENQUEUE_UPLOAD',
-          job: {
-            id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
-            file,
-            status: 'queued',
-            progress: 0,
-          },
-        })
-      } catch (e) {
-        console.error(`Failed to load ${f.name}:`, e)
-      }
+      await loadOneToQueue(f)
     }
   }
 
@@ -137,7 +163,6 @@ function PacksBrowser({ onClose }: { onClose: () => void }) {
         </div>
       ) : (
         <div className="library-list">
-          {/* Back + pack name + load all */}
           <div style={{
             display: 'flex', alignItems: 'center', gap: 8,
             padding: '6px 8px', background: 'var(--lib-header)',
@@ -146,8 +171,8 @@ function PacksBrowser({ onClose }: { onClose: () => void }) {
           }}>
             <span
               style={{ cursor: 'pointer', fontSize: 12, color: 'var(--text-mid)' }}
-              onClick={() => setSelectedPack(null)}
-            >← </span>
+              onClick={() => { audioRef.current?.stop(); setSelectedPack(null); setPlayingFile(null) }}
+            >←</span>
             <span style={{ fontSize: 10, fontWeight: 'bold', letterSpacing: 1, flex: 1 }}>
               {selectedPack.name}
             </span>
@@ -162,15 +187,56 @@ function PacksBrowser({ onClose }: { onClose: () => void }) {
             </button>
           </div>
 
-          {files.map((f, i) => (
-            <div key={f.path} className="library-row" style={{ cursor: 'pointer' }} onClick={() => loadOneToQueue(f)}>
-              <span className="library-row-num">{i + 1}</span>
-              <span className="library-row-name">{f.name.replace(/\.[^.]+$/, '')}</span>
-              <span className="library-row-dur" style={{ fontSize: 9 }}>
-                {(f.size / 1024).toFixed(0)}KB
-              </span>
-            </div>
-          ))}
+          {files.map((f, i) => {
+            const isPlaying = playingFile === f.path
+            return (
+              <div
+                key={f.path}
+                className={`library-row ${isPlaying ? 'playing' : ''}`}
+                style={{ cursor: 'pointer' }}
+              >
+                <span className="library-row-num">{i + 1}</span>
+
+                {/* Play/stop button */}
+                <span
+                  style={{
+                    width: 20, textAlign: 'center', cursor: 'pointer',
+                    color: isPlaying ? 'var(--accent)' : 'var(--text-mid)',
+                    fontSize: 11, flexShrink: 0,
+                  }}
+                  onClick={() => previewFile(f)}
+                  title={isPlaying ? 'Stop' : 'Play preview'}
+                >
+                  {isPlaying ? '■' : '▶'}
+                </span>
+
+                {/* Name — click to preview */}
+                <span
+                  className="library-row-name"
+                  onClick={() => previewFile(f)}
+                >
+                  {f.name.replace(/\.[^.]+$/, '')}
+                </span>
+
+                {/* Upload button */}
+                <span
+                  style={{
+                    fontSize: 9, color: 'var(--accent2)', cursor: 'pointer',
+                    flexShrink: 0, padding: '0 4px',
+                    opacity: state.device ? 1 : 0.3,
+                  }}
+                  onClick={() => state.device && loadOneToQueue(f)}
+                  title={state.device ? 'Upload to device' : 'Connect device first'}
+                >
+                  ↑
+                </span>
+
+                <span className="library-row-dur" style={{ fontSize: 9 }}>
+                  {(f.size / 1024).toFixed(0)}KB
+                </span>
+              </div>
+            )
+          })}
         </div>
       )}
     </div>
