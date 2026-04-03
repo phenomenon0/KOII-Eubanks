@@ -210,7 +210,8 @@ export class DeviceController {
       const processed = await this.audio.process(file)
       this.dispatch({ type: 'UPDATE_UPLOAD', id: jobId, patch: { processed, progress: 20 } })
 
-      // Step 2: get parent node ID
+      // Step 2: ensure filesystem is initialized + get parent node
+      await this.fs.init()
       const soundsNodeId = await this.fs.getNodeId(FS_PATH.SOUNDS)
 
       // Step 3: upload
