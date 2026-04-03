@@ -142,9 +142,26 @@ export function SampleTab() {
     }
   }, [])
 
-  const handleFileDrop = useCallback((e: React.DragEvent) => {
+  const handleFileDrop = useCallback(async (e: React.DragEvent) => {
     e.preventDefault()
     setDragOver(false)
+
+    // Check for pack file path (dragged from Packs browser)
+    const packPath = e.dataTransfer.getData('text/x-pack-file-path')
+    if (packPath && window.electronAPI) {
+      try {
+        const buffer = await window.electronAPI.readFile(packPath)
+        const name = e.dataTransfer.getData('text/x-pack-file-name') || 'sample.wav'
+        const blob = new Blob([buffer], { type: 'audio/wav' })
+        const file = new File([blob], name, { type: 'audio/wav' })
+        loadFile(file)
+      } catch (err) {
+        console.error('Failed to load pack file:', err)
+      }
+      return
+    }
+
+    // Regular file drop from desktop
     const file = e.dataTransfer.files[0]
     if (file) loadFile(file)
   }, [loadFile])

@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { useStore, useDispatch } from '../../store'
 import { DevicePanel } from '../components/DevicePanel'
 import { SoundLibrary } from '../panels/SoundLibrary'
@@ -42,16 +42,20 @@ function PacksBrowser({ onClose }: { onClose: () => void }) {
   const [files, setFiles] = useState<AudioFile[]>([])
   const [loading, setLoading] = useState(true)
   const [playingFile, setPlayingFile] = useState<string | null>(null)
+  const [statusMsg, setStatusMsg] = useState<string | null>(null)
   const audioRef = useRef<{ stop: () => void } | null>(null)
 
   useEffect(() => {
     (async () => {
       try {
         const samplesDir = await window.electronAPI.samplesPath()
+        console.log('[Packs] samples path:', samplesDir)
         const dirs = await window.electronAPI.listDirs(samplesDir)
+        console.log('[Packs] found packs:', dirs)
         setPacks(dirs)
       } catch (e) {
         console.error('Failed to load packs:', e)
+        setStatusMsg('Error loading packs: ' + String(e))
       }
       setLoading(false)
     })()
@@ -61,17 +65,16 @@ function PacksBrowser({ onClose }: { onClose: () => void }) {
     if (!selectedPack) { setFiles([]); return }
     (async () => {
       const audioFiles = await window.electronAPI.listAudioFiles(selectedPack.path)
+      console.log('[Packs] files in', selectedPack.name, ':', audioFiles.length)
       setFiles(audioFiles)
     })()
   }, [selectedPack])
 
-  // Cleanup audio on unmount
   useEffect(() => {
     return () => { audioRef.current?.stop() }
   }, [])
 
   const previewFile = async (f: AudioFile) => {
-    // Stop current preview
     audioRef.current?.stop()
     audioRef.current = null
 
@@ -103,16 +106,15 @@ function PacksBrowser({ onClose }: { onClose: () => void }) {
     } catch (e) {
       console.error('Preview failed:', e)
       setPlayingFile(null)
+      setStatusMsg('Preview failed: ' + String(e))
     }
   }
 
-  const loadAllToQueue = async () => {
-    for (const f of files) {
-      await loadOneToQueue(f)
+  const loadFileToQueue = async (f: AudioFile) => {
+    if (!state.device) {
+      setStatusMsg('Connect EP-133 to KO Studio first (close EP Sample Tool if open)')
+      return
     }
-  }
-
-  const loadOneToQueue = async (f: AudioFile) => {
     try {
       const buffer = await window.electronAPI.readFile(f.path)
       const blob = new Blob([buffer], { type: 'audio/wav' })
@@ -126,10 +128,31 @@ function PacksBrowser({ onClose }: { onClose: () => void }) {
           progress: 0,
         },
       })
+      setStatusMsg(`Queued: ${f.name}`)
     } catch (e) {
       console.error(`Failed to load ${f.name}:`, e)
+      setStatusMsg(`Failed: ${f.name} — ${e}`)
     }
   }
+
+  const loadAllToQueue = async () => {
+    if (!state.device) {
+      setStatusMsg('Connect EP-133 to KO Studio first (close EP Sample Tool if open)')
+      return
+    }
+    setStatusMsg(`Loading ${files.length} files...`)
+    for (const f of files) {
+      await loadFileToQueue(f)
+    }
+    setStatusMsg(`Queued ${files.length} files for upload`)
+  }
+
+  // Drag start handler — allows dragging pack files to Sample Lab or external apps
+  const handleDragStart = useCallback((e: React.DragEvent, f: AudioFile) => {
+    e.dataTransfer.setData('text/x-pack-file-path', f.path)
+    e.dataTransfer.setData('text/x-pack-file-name', f.name)
+    e.dataTransfer.effectAllowed = 'copy'
+  }, [])
 
   return (
     <div className="library-panel">
@@ -138,13 +161,32 @@ function PacksBrowser({ onClose }: { onClose: () => void }) {
         <span style={{ cursor: 'pointer', fontSize: 13 }} onClick={onClose} title="Back to library">x</span>
       </div>
 
+      {/* Status message */}
+      {statusMsg && (
+        <div style={{
+          padding: '4px 8px', fontSize: 10,
+          background: statusMsg.includes('Error') || statusMsg.includes('Failed') || statusMsg.includes('Connect')
+            ? 'rgba(178,46,32,0.1)' : 'rgba(0,166,156,0.1)',
+          color: statusMsg.includes('Error') || statusMsg.includes('Failed') || statusMsg.includes('Connect')
+            ? 'var(--danger)' : 'var(--accent2)',
+          borderBottom: '1px solid var(--lib-border)',
+          cursor: 'pointer',
+        }} onClick={() => setStatusMsg(null)}>
+          {statusMsg}
+        </div>
+      )}
+
       {loading ? (
         <div className="empty-state"><div className="spinner" /></div>
       ) : !selectedPack ? (
         <div className="library-list">
           {packs.length === 0 ? (
-            <div style={{ padding: 16, textAlign: 'center', color: 'var(--text-mid)', fontSize: 11 }}>
-              No packs found in samples/ directory
+            <div style={{ padding: 16, textAlign: 'center', color: 'var(--text-mid)', fontSize: 11, lineHeight: 1.8 }}>
+              No packs found.<br />
+              Add folders to:<br />
+              <code style={{ fontSize: 9, background: 'var(--lib-row-alt)', padding: '2px 6px', borderRadius: 2 }}>
+                ko-workbench/samples/
+              </code>
             </div>
           ) : (
             packs.map(pack => (
@@ -154,7 +196,7 @@ function PacksBrowser({ onClose }: { onClose: () => void }) {
                 style={{ cursor: 'pointer', padding: '8px 12px' }}
                 onClick={() => setSelectedPack(pack)}
               >
-                <span style={{ fontSize: 14, marginRight: 8 }}>📁</span>
+                <span style={{ marginRight: 8, fontSize: 11 }}>+</span>
                 <span className="library-row-name" style={{ fontWeight: 'bold' }}>{pack.name}</span>
                 <span style={{ fontSize: 10, color: 'var(--text-mid)', marginLeft: 'auto' }}>→</span>
               </div>
@@ -180,7 +222,6 @@ function PacksBrowser({ onClose }: { onClose: () => void }) {
               className="btn btn-sm btn-primary"
               style={{ fontSize: 9 }}
               onClick={loadAllToQueue}
-              disabled={!state.device}
               title={state.device ? 'Upload all to device' : 'Connect device first'}
             >
               LOAD ALL ({files.length})
@@ -194,10 +235,11 @@ function PacksBrowser({ onClose }: { onClose: () => void }) {
                 key={f.path}
                 className={`library-row ${isPlaying ? 'playing' : ''}`}
                 style={{ cursor: 'pointer' }}
+                draggable
+                onDragStart={e => handleDragStart(e, f)}
               >
                 <span className="library-row-num">{i + 1}</span>
 
-                {/* Play/stop button */}
                 <span
                   style={{
                     width: 20, textAlign: 'center', cursor: 'pointer',
@@ -210,23 +252,17 @@ function PacksBrowser({ onClose }: { onClose: () => void }) {
                   {isPlaying ? '■' : '▶'}
                 </span>
 
-                {/* Name — click to preview */}
-                <span
-                  className="library-row-name"
-                  onClick={() => previewFile(f)}
-                >
+                <span className="library-row-name" onClick={() => previewFile(f)}>
                   {f.name.replace(/\.[^.]+$/, '')}
                 </span>
 
-                {/* Upload button */}
                 <span
                   style={{
                     fontSize: 9, color: 'var(--accent2)', cursor: 'pointer',
                     flexShrink: 0, padding: '0 4px',
-                    opacity: state.device ? 1 : 0.3,
                   }}
-                  onClick={() => state.device && loadOneToQueue(f)}
-                  title={state.device ? 'Upload to device' : 'Connect device first'}
+                  onClick={() => loadFileToQueue(f)}
+                  title="Upload to device"
                 >
                   ↑
                 </span>
