@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { useStore, useDispatch, useControllersDispatch } from '../store'
+import { useStore, useDispatch } from '../store'
 import { DeviceController } from '../DeviceController'
 import { PerformTab } from './tabs/PerformTab'
 import { SampleTab } from './tabs/SampleTab'
@@ -22,7 +22,6 @@ const TABS: { id: TabId; label: string }[] = [
 export function App() {
   const { state } = useStore()
   const dispatch = useDispatch()
-  const controllersDispatch = useControllersDispatch()
   const controllerRef = useRef<DeviceController | null>(null)
   const [showBackup, setShowBackup] = useState(false)
   const [activeTab, setActiveTab] = useState<TabId>('device')

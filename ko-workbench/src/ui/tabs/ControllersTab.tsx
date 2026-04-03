@@ -7,7 +7,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { useControllers, useControllersDispatch } from '../../store'
 import { useStore } from '../../store'
 import { matchProfile, ControllerProfile } from '../../controllers/profiles'
-import type { ControllerDevice, ControllerMapping } from '../../store/controllers'
+import type { ControllerMapping } from '../../store/controllers'
 
 // ─── Action target options for learn mode ────────────────────
 
