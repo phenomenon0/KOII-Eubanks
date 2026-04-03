@@ -3,7 +3,7 @@
 // Import, chop, preview, and commit samples to EP-133.
 // ────────────────────────────────────────────────────────────
 
-import { useCallback, useRef, useState } from 'react'
+import { useCallback, useRef, useState, useEffect } from 'react'
 import { WaveformEditor } from '../components/WaveformEditor'
 import type { WaveformMarker } from '../components/WaveformEditor'
 import { detectTransients, equalSlices } from '../../audio/slicer'
@@ -284,8 +284,14 @@ export function SampleTab() {
   ]
 
   return (
-    <div className="sample-lab">
-      {/* ── Ingest area ── */}
+    <div className="sample-lab" style={{ display: 'flex', height: '100%' }}>
+      {/* ── Left: Inline file browser ── */}
+      <InlinePacksBrowser onLoadFile={loadFile} />
+
+      {/* ── Right: Editor area ── */}
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+
+      {/* ── Ingest strip ── */}
       <div className="sample-ingest">
         <div
           className={`sample-drop-zone ${dragOver ? 'drag-over' : ''} ${sample ? 'has-sample' : ''}`}
@@ -302,8 +308,8 @@ export function SampleTab() {
             </div>
           ) : (
             <div className="sample-drop-prompt">
-              <span className="sample-drop-icon">&#x1F4C1;</span>
-              <span>Drop audio file here or click to browse</span>
+              <span className="sample-drop-icon">+</span>
+              <span>Drop audio or click to browse</span>
             </div>
           )}
         </div>
@@ -447,6 +453,156 @@ export function SampleTab() {
             </select>
           </div>
         </div>
+      </div>
+
+      </div>{/* end editor area */}
+    </div>
+  )
+}
+
+// ── Inline file browser (packs + recent) ──────────────────
+
+interface PackInfo { name: string; path: string }
+interface AudioFileInfo { name: string; path: string; size: number }
+
+function InlinePacksBrowser({ onLoadFile }: { onLoadFile: (file: File) => void }) {
+  const [packs, setPacks] = useState<PackInfo[]>([])
+  const [selectedPack, setSelectedPack] = useState<PackInfo | null>(null)
+  const [files, setFiles] = useState<AudioFileInfo[]>([])
+  const [playingPath, setPlayingPath] = useState<string | null>(null)
+  const audioRef = useRef<{ stop: () => void } | null>(null)
+
+  useEffect(() => {
+    if (!window.electronAPI?.samplesPath) return
+    ;(async () => {
+      try {
+        const dir = await window.electronAPI.samplesPath()
+        const dirs = await window.electronAPI.listDirs(dir)
+        setPacks(dirs)
+        // Auto-select first pack
+        if (dirs.length > 0) setSelectedPack(dirs[0])
+      } catch { /* no electronAPI */ }
+    })()
+  }, [])
+
+  useEffect(() => {
+    if (!selectedPack || !window.electronAPI?.listAudioFiles) return
+    ;(async () => {
+      const f = await window.electronAPI.listAudioFiles(selectedPack.path)
+      setFiles(f)
+    })()
+  }, [selectedPack])
+
+  useEffect(() => () => { audioRef.current?.stop() }, [])
+
+  const preview = async (f: AudioFileInfo) => {
+    audioRef.current?.stop()
+    audioRef.current = null
+    if (playingPath === f.path) { setPlayingPath(null); return }
+
+    try {
+      const buf = await window.electronAPI.readFile(f.path)
+      const ctx = new AudioContext()
+      const ab = await ctx.decodeAudioData(buf.slice(0))
+      const src = ctx.createBufferSource()
+      src.buffer = ab; src.connect(ctx.destination); src.start()
+      src.onended = () => { setPlayingPath(null); audioRef.current = null; ctx.close() }
+      audioRef.current = { stop: () => { try { src.stop() } catch {} ctx.close() } }
+      setPlayingPath(f.path)
+    } catch { setPlayingPath(null) }
+  }
+
+  const loadIntoEditor = async (f: AudioFileInfo) => {
+    try {
+      const buf = await window.electronAPI.readFile(f.path)
+      const blob = new Blob([buf], { type: 'audio/wav' })
+      const file = new File([blob], f.name, { type: 'audio/wav' })
+      onLoadFile(file)
+    } catch (e) { console.error('Load failed:', e) }
+  }
+
+  if (packs.length === 0) {
+    return (
+      <div style={{
+        width: 200, minWidth: 200, borderRight: '1px solid var(--lib-border)',
+        background: 'var(--lib-bg)', display: 'flex', flexDirection: 'column',
+        fontSize: 10, color: 'var(--text-mid)', padding: 12, textAlign: 'center',
+      }}>
+        No sample packs found.<br />
+        Add folders to samples/
+      </div>
+    )
+  }
+
+  return (
+    <div style={{
+      width: 220, minWidth: 220, borderRight: '1px solid var(--lib-border)',
+      background: 'var(--lib-bg)', display: 'flex', flexDirection: 'column',
+      overflow: 'hidden',
+    }}>
+      {/* Pack tabs */}
+      <div style={{
+        display: 'flex', gap: 2, padding: '4px 4px 0', flexWrap: 'wrap',
+        borderBottom: '1px solid var(--lib-border)', background: 'var(--lib-header)',
+      }}>
+        {packs.map(p => (
+          <button
+            key={p.path}
+            style={{
+              fontSize: 8, padding: '3px 6px', border: '1px solid var(--lib-border)',
+              borderBottom: 'none', borderRadius: '3px 3px 0 0', cursor: 'pointer',
+              background: selectedPack?.path === p.path ? 'var(--lib-bg)' : 'transparent',
+              fontWeight: selectedPack?.path === p.path ? 'bold' : 'normal',
+              color: 'var(--text-dark)', fontFamily: 'inherit',
+            }}
+            onClick={() => setSelectedPack(p)}
+          >
+            {p.name}
+          </button>
+        ))}
+      </div>
+
+      {/* File list */}
+      <div style={{ flex: 1, overflowY: 'auto' }}>
+        {files.map((f, i) => {
+          const playing = playingPath === f.path
+          return (
+            <div
+              key={f.path}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 4,
+                padding: '3px 6px', fontSize: 10, cursor: 'pointer',
+                borderBottom: '1px solid var(--lib-border)',
+                background: playing ? 'rgba(1,167,157,0.12)' : i % 2 ? 'var(--lib-row-alt)' : 'var(--lib-row)',
+              }}
+            >
+              <span style={{ width: 16, color: 'var(--text-mid)', textAlign: 'right', flexShrink: 0 }}>
+                {i + 1}
+              </span>
+
+              {/* Preview */}
+              <span
+                style={{ width: 14, textAlign: 'center', color: playing ? 'var(--accent)' : 'var(--text-mid)', flexShrink: 0 }}
+                onClick={() => preview(f)}
+                title="Preview"
+              >
+                {playing ? '■' : '▶'}
+              </span>
+
+              {/* Name — click to load into editor */}
+              <span
+                style={{
+                  flex: 1, overflow: 'hidden', textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap', color: 'var(--text-dark)',
+                }}
+                onClick={() => loadIntoEditor(f)}
+                title={`Load "${f.name}" into editor`}
+              >
+                {f.name.replace(/\.[^.]+$/, '')}
+              </span>
+            </div>
+          )
+        })}
       </div>
     </div>
   )
