@@ -100,10 +100,20 @@ ipcMain.handle('fs:listDirs', async (_event, dirPath: string) => {
 
 // IPC: get app samples path
 ipcMain.handle('app:samplesPath', async () => {
-  if (isDev) {
-    return path.join(process.cwd(), 'samples')
+  // __dirname is dist-electron/ in dev, so go up one level to reach ko-workbench/
+  const appRoot = path.resolve(__dirname, '..')
+  const candidates = [
+    path.join(appRoot, 'samples'),
+    path.join(process.cwd(), 'samples'),
+    path.join(app.getPath('userData'), 'samples'),
+  ]
+  for (const dir of candidates) {
+    try {
+      fs.accessSync(dir)
+      return dir
+    } catch { /* try next */ }
   }
-  return path.join(app.getPath('userData'), 'samples')
+  return candidates[0] // fallback even if doesn't exist
 })
 
 app.whenReady().then(createWindow)
