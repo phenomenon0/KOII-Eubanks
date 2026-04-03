@@ -7,7 +7,17 @@ import { useCallback, useRef, useState, useEffect } from 'react'
 import { WaveformEditor } from '../components/WaveformEditor'
 import type { WaveformMarker } from '../components/WaveformEditor'
 import { detectTransients, equalSlices } from '../../audio/slicer'
-import { useWorkspaceDispatch } from '../../store'
+import {
+  reverseAudio,
+  normalizeAudio,
+  pitchShift,
+  fadeIn,
+  fadeOut,
+  trimSilence,
+  detectBpm,
+} from '../../audio/quickops'
+import { timeStretch } from '../../audio/stretch'
+import { useWorkspaceDispatch, useDeviceDispatch } from '../../store'
 
 // ─── Types ──────────────────────────────────────────────────
 
@@ -18,6 +28,37 @@ interface LoadedSample {
   durationSec: number
   sampleRate: number
   audioData: Float32Array   // mono float [-1,1]
+}
+
+// ─── WAV encoder ────────────────────────────────────────────
+
+function floatToWavBlob(data: Float32Array, sampleRate: number): Blob {
+  const numSamples = data.length
+  const buffer = new ArrayBuffer(44 + numSamples * 2)
+  const view = new DataView(buffer)
+  const writeStr = (off: number, s: string) => {
+    for (let i = 0; i < s.length; i++) view.setUint8(off + i, s.charCodeAt(i))
+  }
+  writeStr(0, 'RIFF')
+  view.setUint32(4, 36 + numSamples * 2, true)
+  writeStr(8, 'WAVE')
+  writeStr(12, 'fmt ')
+  view.setUint32(16, 16, true)
+  view.setUint16(20, 1, true)
+  view.setUint16(22, 1, true) // mono
+  view.setUint32(24, sampleRate, true)
+  view.setUint32(28, sampleRate * 2, true)
+  view.setUint16(32, 2, true)
+  view.setUint16(34, 16, true)
+  writeStr(36, 'data')
+  view.setUint32(40, numSamples * 2, true)
+  let offset = 44
+  for (let i = 0; i < numSamples; i++) {
+    const s = Math.max(-1, Math.min(1, data[i]))
+    view.setInt16(offset, s < 0 ? s * 32768 : s * 32767, true)
+    offset += 2
+  }
+  return new Blob([buffer], { type: 'audio/wav' })
 }
 
 // ─── Audio helpers ──────────────────────────────────────────
@@ -102,10 +143,34 @@ function playPreview(
   }
 }
 
+// ─── Toolbar button style ──────────────────────────────────
+
+const tbBtnStyle: React.CSSProperties = {
+  fontSize: 9,
+  padding: '3px 6px',
+  border: '1px solid var(--btn-border, #444)',
+  borderRadius: 3,
+  background: 'var(--btn-bg, #1a1a1a)',
+  color: 'var(--text-dark, #ccc)',
+  cursor: 'pointer',
+  fontFamily: 'inherit',
+  lineHeight: 1.2,
+  whiteSpace: 'nowrap',
+}
+
+const tbSepStyle: React.CSSProperties = {
+  width: 1,
+  alignSelf: 'stretch',
+  background: 'var(--btn-border, #444)',
+  margin: '2px 4px',
+  flexShrink: 0,
+}
+
 // ─── Component ──────────────────────────────────────────────
 
 export function SampleTab() {
-  const dispatch = useWorkspaceDispatch()
+  const wsDispatch = useWorkspaceDispatch()
+  const deviceDispatch = useDeviceDispatch()
 
   // Sample state
   const [sample, setSample] = useState<LoadedSample | null>(null)
@@ -118,9 +183,51 @@ export function SampleTab() {
   const [targetBank, setTargetBank] = useState(0)
   const [dragOver, setDragOver] = useState(false)
   const [loadError, setLoadError] = useState<string | null>(null)
+  const [selectedSlice, setSelectedSlice] = useState<number | null>(null)
+  const [detectedBpm, setDetectedBpm] = useState<number | null>(null)
+
+  // Undo stack (last 10 states)
+  const [undoStack, setUndoStack] = useState<Float32Array[]>([])
 
   const fileInputRef = useRef<HTMLInputElement>(null)
   const nextMarkerId = useRef(1)
+
+  // ── BPM detection ───────────────────────────────────────
+
+  useEffect(() => {
+    if (sample && sample.durationSec > 0.5) {
+      setDetectedBpm(detectBpm(sample.audioData, sample.sampleRate))
+    } else {
+      setDetectedBpm(null)
+    }
+  }, [sample?.audioData, sample?.sampleRate, sample?.durationSec])
+
+  // ── Undo system ─────────────────────────────────────────
+
+  const pushUndo = useCallback(() => {
+    if (!sample) return
+    setUndoStack(prev => [...prev.slice(-9), new Float32Array(sample.audioData)])
+  }, [sample])
+
+  const undo = useCallback(() => {
+    if (undoStack.length === 0 || !sample) return
+    const prev = undoStack[undoStack.length - 1]
+    setSample({ ...sample, audioData: prev, durationSec: prev.length / sample.sampleRate })
+    setUndoStack(s => s.slice(0, -1))
+    setMarkers([])
+    setSelectedSlice(null)
+  }, [undoStack, sample])
+
+  // ── Transform helper ────────────────────────────────────
+
+  const applyTransform = useCallback((fn: (data: Float32Array) => Float32Array) => {
+    if (!sample) return
+    pushUndo()
+    const newData = fn(sample.audioData)
+    setSample({ ...sample, audioData: newData, durationSec: newData.length / sample.sampleRate })
+    setMarkers([])
+    setSelectedSlice(null)
+  }, [sample, pushUndo])
 
   // ── File loading ─────────────────────────────────────────
 
@@ -136,6 +243,9 @@ export function SampleTab() {
       stopPreview()
       setIsPlaying(false)
       setPlaybackPos(undefined)
+      setUndoStack([])
+      setSelectedSlice(null)
+      setDetectedBpm(null)
       nextMarkerId.current = 1
     } catch (e) {
       setLoadError(String(e))
@@ -179,8 +289,8 @@ export function SampleTab() {
     const newMarkers = [...markers, marker].sort((a, b) => a.position - b.position)
     setMarkers(newMarkers)
     // Sync to workspace store
-    dispatch({ type: 'ADD_SLICE_MARKER', marker: { id, position, label: marker.label } })
-  }, [markers, dispatch])
+    wsDispatch({ type: 'ADD_SLICE_MARKER', marker: { id, position, label: marker.label } })
+  }, [markers, wsDispatch])
 
   const moveMarker = useCallback((id: string, position: number) => {
     setMarkers(prev => {
@@ -191,14 +301,15 @@ export function SampleTab() {
 
   const removeMarker = useCallback((id: string) => {
     setMarkers(prev => prev.filter(m => m.id !== id))
-    dispatch({ type: 'REMOVE_SLICE_MARKER', id })
-  }, [dispatch])
+    wsDispatch({ type: 'REMOVE_SLICE_MARKER', id })
+  }, [wsDispatch])
 
   // ── Slice modes ──────────────────────────────────────────
 
   const applySliceMode = useCallback((mode: SliceMode) => {
     if (!sample) return
     setSliceMode(mode)
+    setSelectedSlice(null)
 
     if (mode === 'manual') return // keep existing markers
 
@@ -226,6 +337,7 @@ export function SampleTab() {
   const clearMarkers = useCallback(() => {
     setMarkers([])
     setSliceMode('manual')
+    setSelectedSlice(null)
   }, [])
 
   // ── Preview playback ────────────────────────────────────
@@ -248,9 +360,36 @@ export function SampleTab() {
     )
   }, [sample, isPlaying])
 
+  const handlePreviewSlice = useCallback(() => {
+    if (!sample || selectedSlice === null) return
+    const boundaries = [0, ...markers.map(m => m.position), sample.audioData.length]
+    const start = boundaries[selectedSlice]
+    const end = boundaries[selectedSlice + 1]
+    if (start === undefined || end === undefined) return
+    stopPreview()
+    setIsPlaying(true)
+    playPreview(
+      sample.audioData.subarray(start, end),
+      sample.sampleRate,
+      () => { setIsPlaying(false); setPlaybackPos(undefined) },
+      (pos) => setPlaybackPos(start + pos),
+    )
+  }, [sample, markers, selectedSlice])
+
   const handleSeek = useCallback((position: number) => {
     setPlaybackPos(position)
-  }, [])
+    // Determine which slice the user clicked in
+    if (sample && markers.length > 0) {
+      const boundaries = [0, ...markers.map(m => m.position), sample.audioData.length]
+      for (let i = 0; i < boundaries.length - 1; i++) {
+        if (position >= boundaries[i] && position < boundaries[i + 1]) {
+          setSelectedSlice(i)
+          return
+        }
+      }
+    }
+    setSelectedSlice(null)
+  }, [sample, markers])
 
   // ── Loop change ──────────────────────────────────────────
 
@@ -259,19 +398,72 @@ export function SampleTab() {
     setLoopEnd(end)
   }, [])
 
-  // ── Commit actions (placeholders for device integration) ─
+  // ── Crop to loop region ─────────────────────────────────
+
+  const handleCrop = useCallback(() => {
+    if (!sample) return
+    const cropStart = loopStart ?? 0
+    const cropEnd = loopEnd ?? sample.audioData.length
+    if (cropStart === 0 && cropEnd === sample.audioData.length) return // no-op
+    pushUndo()
+    const cropped = sample.audioData.slice(cropStart, cropEnd)
+    setSample({ ...sample, audioData: cropped, durationSec: cropped.length / sample.sampleRate })
+    setMarkers([])
+    setSelectedSlice(null)
+    setLoopStart(undefined)
+    setLoopEnd(undefined)
+  }, [sample, loopStart, loopEnd, pushUndo])
+
+  // ── Send to Device ──────────────────────────────────────
 
   const handleSendToDevice = useCallback(() => {
     if (!sample) return
-    console.log('Send to device — bank:', targetBank, 'sample:', sample.name)
-    // TODO: process via AudioProcessor and upload via protocol
-  }, [sample, targetBank])
+    const wavBlob = floatToWavBlob(sample.audioData, sample.sampleRate)
+    const file = new File([wavBlob], sample.name, { type: 'audio/wav' })
+    deviceDispatch({
+      type: 'ENQUEUE_UPLOAD',
+      job: {
+        id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        file,
+        status: 'queued',
+        progress: 0,
+      },
+    })
+  }, [sample, deviceDispatch])
+
+  // ── Spread to Pads ─────────────────────────────────────
 
   const handleSpreadToPads = useCallback(() => {
     if (!sample || markers.length === 0) return
-    console.log('Spread to pads — bank:', targetBank, 'slices:', markers.length + 1)
-    // TODO: extract each slice, process, and assign to sequential pads
-  }, [sample, markers, targetBank])
+    const boundaries = [0, ...markers.map(m => m.position), sample.audioData.length]
+    for (let i = 0; i < boundaries.length - 1; i++) {
+      const sliceData = sample.audioData.slice(boundaries[i], boundaries[i + 1])
+      const wavBlob = floatToWavBlob(sliceData, sample.sampleRate)
+      const sliceName = `${sample.name.replace(/\.[^.]+$/, '')}_slice${i + 1}.wav`
+      const file = new File([wavBlob], sliceName, { type: 'audio/wav' })
+      deviceDispatch({
+        type: 'ENQUEUE_UPLOAD',
+        job: {
+          id: `${Date.now()}-${Math.random().toString(36).slice(2)}-${i}`,
+          file,
+          status: 'queued',
+          progress: 0,
+        },
+      })
+    }
+  }, [sample, markers, deviceDispatch])
+
+  // ── Save WAV export ─────────────────────────────────────
+
+  const handleSaveWav = useCallback(async () => {
+    if (!sample || !window.electronAPI) return
+    const wavBlob = floatToWavBlob(sample.audioData, sample.sampleRate)
+    const defaultName = sample.name.replace(/\.[^.]+$/, '') + '_edited.wav'
+    const savePath = await window.electronAPI.saveFile(defaultName)
+    if (!savePath) return
+    const buffer = await wavBlob.arrayBuffer()
+    await window.electronAPI.writeFile(savePath, buffer)
+  }, [sample])
 
   // ── Render ───────────────────────────────────────────────
 
@@ -334,6 +526,84 @@ export function SampleTab() {
 
       {loadError && (
         <div className="sample-error">{loadError}</div>
+      )}
+
+      {/* ── Transform toolbar ── */}
+      {sample && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 3, padding: '4px 8px',
+          borderBottom: '1px solid var(--btn-border, #444)',
+          background: 'var(--panel-bg, #111)',
+          flexWrap: 'wrap',
+        }}>
+          <button
+            style={{ ...tbBtnStyle, opacity: undoStack.length === 0 ? 0.35 : 1 }}
+            onClick={undo}
+            disabled={undoStack.length === 0}
+            title="Undo last transform"
+          >
+            Undo
+          </button>
+
+          <div style={tbSepStyle} />
+
+          <button style={tbBtnStyle} onClick={() => applyTransform(reverseAudio)} title="Reverse">
+            Rev
+          </button>
+          <button style={tbBtnStyle} onClick={() => applyTransform(normalizeAudio)} title="Normalize">
+            Norm
+          </button>
+          <button style={tbBtnStyle} onClick={() => applyTransform(d => trimSilence(d, 0.01))} title="Trim silence">
+            Trim
+          </button>
+          <button style={tbBtnStyle} onClick={() => applyTransform(d => fadeIn(d, Math.floor(sample.sampleRate * 0.05)))} title="Fade in (50ms)">
+            FadeIn
+          </button>
+          <button style={tbBtnStyle} onClick={() => applyTransform(d => fadeOut(d, Math.floor(sample.sampleRate * 0.05)))} title="Fade out (50ms)">
+            FadeOut
+          </button>
+
+          <div style={tbSepStyle} />
+
+          <button style={tbBtnStyle} onClick={() => applyTransform(d => pitchShift(d, 1))} title="+1 semitone">
+            +1
+          </button>
+          <button style={tbBtnStyle} onClick={() => applyTransform(d => pitchShift(d, -1))} title="-1 semitone">
+            -1
+          </button>
+          <button style={tbBtnStyle} onClick={() => applyTransform(d => pitchShift(d, 12))} title="+12 semitones (octave up)">
+            +12
+          </button>
+          <button style={tbBtnStyle} onClick={() => applyTransform(d => pitchShift(d, -12))} title="-12 semitones (octave down)">
+            -12
+          </button>
+
+          <div style={tbSepStyle} />
+
+          <button style={tbBtnStyle} onClick={() => applyTransform(d => timeStretch(d, sample.sampleRate, 2))} title="Half speed (2x duration)">
+            x0.5
+          </button>
+          <button style={tbBtnStyle} onClick={() => applyTransform(d => timeStretch(d, sample.sampleRate, 0.5))} title="Double speed (0.5x duration)">
+            x2
+          </button>
+
+          <div style={tbSepStyle} />
+
+          <button
+            style={{ ...tbBtnStyle, opacity: (loopStart !== undefined && loopEnd !== undefined) ? 1 : 0.35 }}
+            onClick={handleCrop}
+            disabled={loopStart === undefined || loopEnd === undefined}
+            title="Crop to loop selection"
+          >
+            Crop
+          </button>
+
+          <div style={tbSepStyle} />
+
+          <button style={tbBtnStyle} onClick={handleSaveWav} title="Export as WAV">
+            Save WAV
+          </button>
+        </div>
       )}
 
       {/* ── Waveform Editor ── */}
@@ -410,7 +680,12 @@ export function SampleTab() {
           </button>
         </div>
         <span className="slice-count">
-          {sample ? `${sliceCount} slice${sliceCount !== 1 ? 's' : ''}` : ''}
+          {sample ? (
+            <>
+              {sliceCount} slice{sliceCount !== 1 ? 's' : ''}
+              {detectedBpm !== null && ` | BPM: ${detectedBpm}`}
+            </>
+          ) : ''}
         </span>
       </div>
 
@@ -422,7 +697,16 @@ export function SampleTab() {
             onClick={handlePreview}
             disabled={!sample}
           >
-            {isPlaying ? 'Stop' : 'Preview'}
+            {isPlaying ? 'Stop' : 'Preview All'}
+          </button>
+
+          <button
+            className="btn btn-teal"
+            onClick={handlePreviewSlice}
+            disabled={!sample || selectedSlice === null}
+            title={selectedSlice !== null ? `Preview slice ${selectedSlice + 1}` : 'Click waveform to select a slice'}
+          >
+            Preview Slice{selectedSlice !== null ? ` ${selectedSlice + 1}` : ''}
           </button>
 
           <button

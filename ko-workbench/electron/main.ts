@@ -2,6 +2,9 @@ import { app, BrowserWindow, ipcMain, dialog, session } from 'electron'
 import path from 'node:path'
 import fs from 'node:fs'
 
+// Fix GPU crash on Wayland (dmabuf rejection → SIGTRAP)
+app.disableHardwareAcceleration()
+
 const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged
 
 function grantMidi(ses: Electron.Session) {
@@ -23,7 +26,7 @@ function createWindow() {
     minWidth: 1100,
     minHeight: 700,
     title: 'KO Workbench',
-    backgroundColor: '#0f0f0f',
+    backgroundColor: '#DBDDDB',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       nodeIntegration: false,
@@ -34,11 +37,11 @@ function createWindow() {
   // Also grant on the window's session in case it differs
   grantMidi(win.webContents.session)
 
+  // Always load built files — use `npm run electron:dev` for hot reload
+  win.loadFile(path.join(__dirname, '../dist/index.html'))
+
   if (isDev) {
-    win.loadURL('http://localhost:5173')
     win.webContents.openDevTools()
-  } else {
-    win.loadFile(path.join(__dirname, '../dist/index.html'))
   }
 }
 
